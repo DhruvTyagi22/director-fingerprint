@@ -215,11 +215,22 @@ def extract_features(srt_content):
     }
 
 # ── Classification ────────────────────────────────────────────────────────────
-def classify(features):
+def classify(features, selected=None):
+    active_model = st.session_state.get('custom_model', model)
     x = np.array([features[f] for f in FEATURES]).reshape(1, -1)
     x_sc = scaler.transform(x)
-    proba = model.predict_proba(x_sc)[0]
-    return {d: float(p) for d, p in zip(model.classes_, proba)}
+    proba = active_model.predict_proba(x_sc)[0]
+    full = {d: float(p) for d, p in zip(active_model.classes_, proba)}
+
+    if selected and len(selected) < len(active_model.classes_):
+        # Filter to selected directors and renormalize so they sum to 100%
+        filtered = {d: full[d] for d in selected if d in full}
+        total = sum(filtered.values())
+        if total > 0:
+            filtered = {d: p / total for d, p in filtered.items()}
+        return filtered
+
+    return full
 
 # ── Cinematic traits ──────────────────────────────────────────────────────────
 COLORS = {
@@ -308,6 +319,25 @@ st.markdown("## Director fingerprint")
 st.markdown("Type any film title. We read how it breathes.")
 st.markdown("")
 
+# ── Director selector ─────────────────────────────────────────────────────────
+all_directors = list(model.classes_)
+# Include any custom director added this session
+if 'custom_model' in st.session_state:
+    all_directors = list(st.session_state['custom_model'].classes_)
+
+selected_directors = st.multiselect(
+    label="Compare against",
+    options=all_directors,
+    default=all_directors,
+    help="Select which directors to include in the comparison. Deselect a director to remove them from results."
+)
+
+if not selected_directors:
+    st.warning("Select at least one director to compare against.")
+    st.stop()
+
+st.markdown("")
+
 query = st.text_input(
     label="film_search",
     placeholder="e.g.  Parasite   ·   The Godfather   ·   Spirited Away   ·   Dune",
@@ -326,12 +356,11 @@ if query and len(query.strip()) > 1:
     if error:
         st.error(f"Couldn't find '{query}'. Try adding the year — e.g. 'Parasite 2019'")
     else:
-        proba  = classify(features)
+        proba  = classify(features, selected=selected_directors)
         traits = compute_traits(features)
 
         sorted_proba = sorted(proba.items(), key=lambda x: -x[1])
         winner, wp   = sorted_proba[0]
-        runner, rp   = sorted_proba[1]
         color        = COLORS.get(winner, DEFAULT_COLOR)
 
         # ── Header ───────────────────────────────────────────────────────────
@@ -415,27 +444,23 @@ if query and len(query.strip()) > 1:
 
         fig_radar = go.Figure()
 
-        # Runner-up first (background)
-        if runner in DIRECTOR_AVGS:
-            rv = [DIRECTOR_AVGS[runner][k] for k in trait_keys]
-            fig_radar.add_trace(go.Scatterpolar(
-                r=rv + [rv[0]], theta=trait_names + [trait_names[0]],
-                fill='toself', name=f'{runner}',
-                line_color=COLORS.get(runner,'#aaa'),
-                fillcolor='rgba(0,0,0,0)',
-                line_dash='dot', line_width=1,
-                opacity=0.6,
-            ))
-
-        # Winner average
+        # All selected directors (winner drawn last so it's on top)
+        dirs_for_radar = [d for d in selected_directors if d in DIRECTOR_AVGS and d != winner]
         if winner in DIRECTOR_AVGS:
-            wv = [DIRECTOR_AVGS[winner][k] for k in trait_keys]
+            dirs_for_radar.append(winner)
+
+        for d in dirs_for_radar:
+            dv = [DIRECTOR_AVGS[d][k] for k in trait_keys]
+            dc = COLORS.get(d, DEFAULT_COLOR)
+            is_winner = (d == winner)
             fig_radar.add_trace(go.Scatterpolar(
-                r=wv + [wv[0]], theta=trait_names + [trait_names[0]],
-                fill='toself', name=f'{winner} avg',
-                line_color=color,
-                fillcolor=f'rgba({int(color[1:3],16)},{int(color[3:5],16)},{int(color[5:7],16)},0.08)',
-                line_dash='dash', line_width=1.5,
+                r=dv + [dv[0]], theta=trait_names + [trait_names[0]],
+                fill='toself', name=f'{d} avg',
+                line_color=dc,
+                fillcolor=f'rgba({int(dc[1:3],16)},{int(dc[3:5],16)},{int(dc[5:7],16)},{"0.10" if is_winner else "0"})',
+                line_dash='solid' if is_winner else 'dot',
+                line_width=2 if is_winner else 1,
+                opacity=1.0 if is_winner else 0.55,
             ))
 
         # This film
@@ -475,9 +500,13 @@ if query and len(query.strip()) > 1:
             f"The dialogue is {econ_word} — "
             f"{'a narrow vocabulary used repeatedly' if traits['Economy'] < 0.35 else 'words chosen with care' if traits['Economy'] > 0.6 else 'neither spare nor excessive'}. "
             f"Exchanges are {intens_word}. "
-            f"The closest alternative is **{runner}** ({round(rp*100)}%) — "
-            f"{'the gap is wide, this is a confident call' if wp - rp > 0.3 else 'the gap is narrow, suggesting these directors share stylistic territory'}."
         )
+        if len(sorted_proba) > 1:
+            runner, rp = sorted_proba[1]
+            explanation += (
+                f"The closest alternative is **{runner}** ({round(rp*100)}%) — "
+                f"{'the gap is wide, this is a confident call' if wp - rp > 0.3 else 'the gap is narrow, suggesting these directors share stylistic territory'}."
+            )
         st.markdown(explanation)
 
 # ── Sidebar: Add a director ───────────────────────────────────────────────────
